@@ -12,7 +12,11 @@
 #/   --parse-only           Parse an already downloaded APT repository metadata
 #/   --patch-no-download    Parse and patch an already downloaded APT repository metadata
 #/
-#set -x
+# added by Julia K. to debug from command line
+#if [ "x${1}" = "x-d" ] ; then
+#  shift
+#  set -x
+#fi
 
 set -e
 
@@ -30,7 +34,17 @@ CVE_DATA="https://security-tracker.debian.org/tracker/data/json"
 
 TMP=${TMP:-$(mktemp -d)}
 
+# added by Julia K.
+declare PRG_NAME=${0}
 declare -A SEEN_PKG
+declare FORMATED_JSON_FILE="$TMP/cve.json.formated"
+declare STARTED_TIME=`date +%s`
+# maximum run time must be not more than 10 min
+declare MAX_TIME=3600
+# set max time warning for downloading packages - 7 min
+declare MAX_TIME_1=2520
+# set max time warning for updating packages - 9 min
+declare MAX_TIME_2=3240
 
 red=$(tput -Txterm setaf 1)
 reset=$(tput -Txterm sgr0)
@@ -45,6 +59,17 @@ gh_debug(){
 download_cve_data(){
   gh_debug "downloading CVE json"
   curl -s $CVE_DATA -o "$TMP/cve.json"
+}
+
+# added by Julia K.
+sort_cve_data(){
+  # if file is not created - skip the rest
+  [ -f ${TMP}/cve.json ] || return
+
+  # script tested on Python 2.7.3
+  # convert cve.json file to sorted one-line format:
+  # python-scipy: CVE-2013-4251: <description>
+  ./json-decoder.py ${TMP}/cve.json >${FORMATED_JSON_FILE}
 }
 
 print_cve_data(){
@@ -69,20 +94,25 @@ print_cve_data(){
   # Tracking if a source package has been seen still needs to be implemented
   # in this script, we recommend using a Bash associative array for that.
   
-  # FIXME: this has to be own function after download_cve_data
-  # create file once
-  local f=${TMP}/cve.json.formated
-  if [ ! -e ${f} ] ; then
-	# we cannot filter by src_package because cve.json is single line
-  	./json-decoder.py ${TMP}/cve.json >${f}
-  fi
-
-  # FIXME: his has to be own function after print_cve_data
-  # get CVE unique info from formated file:
+  # added by Julia K.
+  # see function sort_cve_data(): create cve.json.formated file
+  # get CVE pkg_info info from formated file:
+  local f=${FORMATED_JSON_FILE}
   if [ "x${SEEN_PKG[$src_package]}" = "x" ] ; then
     SEEN_PKG[$src_package]=1
-    grep -wE "^${src_package}:" ${f} | sort | uniq | sed -s "s/^$src_package: /* Security Tracker: /g"
+    gh_debug "DEBUG: $src_package:"
+    grep -wE "^${src_package}:" ${f} | sed -s "s/^$src_package: /* Security Tracker: /g"
   fi
+}
+
+# added by Julia K.
+count_remaining_time(){
+  local cur_time=$(date +%s)
+  ellapsed_time=$((${cur_time}-${STARTED_TIME}))
+  if [ $ellapsed_time -gt ${1} ] ; then
+    return 1
+  fi
+  return 0
 }
 
 # downloads all the packages from defined sources
@@ -91,6 +121,11 @@ download_packages(){
   mkdir -p "$TMP"
   #download all the packages.gz file
   for t in $DEBSOURCES; do
+    # added by Julia K. count limited time
+    count_remaining_time ${MAX_TIME_1}
+    if [ $? -eq 1 ] ; then
+      gh_debug "${FUNCNAME}: Ellapsed time: ${MAX_TIME_1} sec"
+    fi
     #extract distro name from source. use distro_repo.gz as filename
     distro=$(echo "$t" | awk -F'/' '{print $4 "_" $6}')
     pfile=$distro.gz
@@ -100,7 +135,9 @@ download_packages(){
     #download the dist packages
     curl -L -s "$t" -o  "$TMP/$pfile"
   done
-  download_cve_data
+  # moved by Julia K.
+  #download_cve_data
+  #sort_cve_data
 }
 
 # Unzips the package file, parses the current manifest files,
@@ -123,7 +160,19 @@ parse_and_patch_packages(){
     unzipped_package_file=$f.$RANDOM
     gunzip -c "$f" > "$unzipped_package_file"
 
+    # added by Julia K. count limited time
+    count_remaining_time ${MAX_TIME_1}
+    if [ $? -eq 1 ] ; then
+      gh_debug "${FUNCNAME}: Ellapsed time: ${MAX_TIME_1} sec"
+    fi
+
     for m_f in $patch_files; do
+      # added by Julia K. count limited time - if less then 1 min left - report
+      count_remaining_time ${MAX_TIME_2}
+      if [ $? -eq 1 ] ; then
+        gh_debug "${FUNCNAME}: Ellapsed time: ${MAX_TIME_2} sec"
+      fi
+
       current_manifest_file="$m_f"
 
       #parse the current manifest file to get all the package names
@@ -202,19 +251,51 @@ main(){
   case "$1" in
     "--dry-run")
       download_packages
+      download_cve_data
+      sort_cve_data
+      # added by Julia K. count limited time
+      count_remaining_time ${MAX_TIME_2}
+      if [ $? -eq 1 ] ; then
+        gh_debug "${FUNCNAME}: Ellapsed time: ${MAX_TIME_2} sec"
+      fi
       parse_and_patch_packages
       ;;
     "--patch")
       download_packages
+
+      # added by Julia K. count limited time
+      download_cve_data
+      sort_cve_data
+      count_remaining_time ${MAX_TIME_2}
+      if [ $? -eq 1 ] ; then
+        gh_debug "${FUNCNAME}: Ellapsed time: ${MAX_TIME_2} sec"
+      fi
+
       parse_and_patch_packages --patch
       ;;
     "--download-only")
       download_packages
       ;;
     "--parse-only")
+      # added by Julia K. count limited time
+      download_cve_data
+      sort_cve_data
+      count_remaining_time ${MAX_TIME_1}
+      if [ $? -eq 1 ] ; then
+        gh_debug "${FUNCNAME}: Ellapsed time: ${MAX_TIME_1} sec"
+      fi
+
       parse_and_patch_packages
       ;;
     "--patch-no-download")
+      # added by Julia K. count limited time
+      download_cve_data
+      sort_cve_data
+      count_remaining_time ${MAX_TIME_1}
+      if [ $? -eq 1 ] ; then
+        gh_debug "${FUNCNAME}: Ellapsed time: ${MAX_TIME_1} sec"
+      fi
+
       parse_and_patch_packages --patch
       ;;
     *)
